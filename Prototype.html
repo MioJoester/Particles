@@ -1,308 +1,498 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Enhanced Hand Particle Morph</title>
-<style>
-    body { margin: 0; overflow: hidden; background: black; font-family: sans-serif; }
-    #video-container {
-        position: absolute;
-        bottom: 10px;
-        left: 10px;
-        width: 260px;
-        height: 220px;
-        border: 2px solid white;
-        transform: scaleX(-1);
-        border-radius: 8px;
-        overflow: hidden;
-    }
-    #ui {
-        position: absolute;
-        top: 20px;
-        left: 20px;
-        color: white;
-        pointer-events: none;
-    }
-    .label { font-size: 12px; opacity: 0.7; }
-    .gesture-name { font-size: 24px; font-weight: bold; color: #00ffcc; }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture Particle & Shape Morph</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #video-container { position: absolute; bottom: 10px; left: 10px; width: 260px; height: 220px; border: 2px solid white; transform: scaleX(-1); border-radius: 8px; overflow: hidden; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
+        .label { font-size: 12px; opacity: 0.7; }
+        .gesture-name { font-size: 24px; font-weight: bold; color: #00ffcc; }
+        .mode-indicator { font-size: 18px; font-weight: bold; color: #ff00ff; margin-top: 10px; }
+        .mode-particles { color: #00ffcc; }
+        .mode-shapes { color: #ff6b6b; }
+    </style>
 </head>
-
 <body>
-<div id="ui">
-    <div class="label">CURRENT SHAPE</div>
-    <div id="shape-display" class="gesture-name">Initializing…</div>
-</div>
 
-<div id="video-container">
-    <video id="webcam" autoplay playsinline></video>
-</div>
+    <div id="ui">
+        <div class="label">CURRENT MODE</div>
+        <div id="mode-display" class="mode-indicator mode-particles">PARTICLES MODE</div>
+        
+        <div class="label" style="margin-top:10px">CURRENT SHAPE</div>
+        <div id="shape-display" class="gesture-name">Initializing...</div>
+        
+        <div class="label" style="margin-top:10px">CONTROLS</div>
+        <div style="font-size: 14px">
+            <strong>Peace Sign (✌):</strong> Switch Mode<br>
+            <strong>Pinch:</strong> Change Shape<br>
+            <strong>Open Palm:</strong> Expand/Scale<br>
+            <strong>Move Hand:</strong> Translate<br>
+            <strong>Tilt Hand:</strong> Rotate (Shapes Mode)
+        </div>
+    </div>
+    <div id="video-container">
+        <video id="webcam" autoplay playsinline></video>
+    </div>
 
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-  }
-}
-</script>
-
-<script type="module">
-import * as THREE from 'three';
-import { HandLandmarker, FilesetResolver } from
-"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
-
-const PARTICLE_COUNT = 15000;
-const SHAPES = ['SPHERE','HEART','SATURN','FLOWER','EXPLOSION'];
-
-const SHAPE_BEHAVIOR = {
-    SPHERE:   { rotation: 0.002, noise: 0.10 },
-    HEART:    { rotation: 0.001, noise: 0.20 },
-    SATURN:   { rotation: 0.004, noise: 0.05 },
-    FLOWER:   { rotation: 0.003, noise: 0.15 },
-    EXPLOSION:{ rotation: 0.000, noise: 0.40 }
-};
-
-let currentShapeIndex = 0;
-
-const state = {
-    morph: 1,
-    expansion: 0,
-    hand: new THREE.Vector3(),
-    handPresent: false
-};
-
-// ---------- THREE SETUP ----------
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
-camera.position.z = 6;
-
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(devicePixelRatio);
-renderer.autoClear = false;
-document.body.appendChild(renderer.domElement);
-
-// ---------- GEOMETRY ----------
-const geometry = new THREE.BufferGeometry();
-const positions = new Float32Array(PARTICLE_COUNT * 3);
-const targets   = new Float32Array(PARTICLE_COUNT * 3);
-const velocities= new Float32Array(PARTICLE_COUNT * 3);
-const colors    = new Float32Array(PARTICLE_COUNT * 3);
-
-for (let i = 0; i < PARTICLE_COUNT; i++) {
-    positions[i*3+0] = (Math.random()-0.5)*10;
-    positions[i*3+1] = (Math.random()-0.5)*10;
-    positions[i*3+2] = (Math.random()-0.5)*10;
-
-    colors[i*3+0] = 0.4 + Math.random()*0.6;
-    colors[i*3+1] = 0.8;
-    colors[i*3+2] = 1.0;
-}
-
-geometry.setAttribute('position', new THREE.BufferAttribute(positions,3));
-geometry.setAttribute('targetPos', new THREE.BufferAttribute(targets,3));
-geometry.setAttribute('velocity', new THREE.BufferAttribute(velocities,3));
-geometry.setAttribute('color', new THREE.BufferAttribute(colors,3));
-
-// ---------- SHADERS ----------
-const material = new THREE.ShaderMaterial({
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    uniforms: {
-        uTime: { value: 0 },
-        uMorph: { value: 0 },
-        uHand: { value: new THREE.Vector3() },
-        uExpansion: { value: 0 },
-        uNoiseStrength: { value: 0.15 }
-    },
-    vertexShader: `
-        uniform float uTime, uMorph, uExpansion, uNoiseStrength;
-        uniform vec3 uHand;
-        attribute vec3 targetPos, velocity, color;
-        varying vec3 vColor;
-        varying float vDepth;
-
-        float hash(float n){ return fract(sin(n)*43758.5453); }
-        float noise(vec3 x){
-            vec3 p=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
-            float n=p.x+p.y*57.0+p.z*113.0;
-            return mix(
-                mix(mix(hash(n),hash(n+1.),f.x),
-                    mix(hash(n+57.),hash(n+58.),f.x),f.y),
-                mix(mix(hash(n+113.),hash(n+114.),f.x),
-                    mix(hash(n+170.),hash(n+171.),f.x),f.y),f.z);
-        }
-
-        void main(){
-            vColor = color;
-            vec3 pos = mix(position, targetPos, uMorph);
-
-            float n = noise(pos*0.8 + uTime*0.3);
-            pos += normalize(pos+0.0001) * n * uNoiseStrength;
-
-            float d = distance(pos, uHand);
-            float influence = smoothstep(3.0, 0.0, d);
-
-            vec3 dir = pos - uHand;
-            pos += normalize(dir) * influence * uExpansion;
-            pos.xz += vec2(-dir.z, dir.x) * influence * 0.8;
-
-            vec4 mv = modelViewMatrix * vec4(pos,1.0);
-            vDepth = -mv.z;
-            gl_PointSize = (18.0 / -mv.z) * (1.0 + influence);
-            gl_Position = projectionMatrix * mv;
-        }
-    `,
-    fragmentShader: `
-        varying vec3 vColor;
-        varying float vDepth;
-        void main(){
-            float d = distance(gl_PointCoord, vec2(0.5));
-            if(d > 0.5) discard;
-            float a = 1.0 - smoothstep(0.35,0.5,d);
-            vec3 depthColor = mix(vColor, vec3(0.1,0.8,1.0), vDepth*0.02);
-            gl_FragColor = vec4(depthColor, a);
-        }
-    `
-});
-
-const points = new THREE.Points(geometry, material);
-scene.add(points);
-
-// ---------- SHAPES ----------
-function setShape(type){
-    const p = geometry.attributes.position.array;
-    const t = geometry.attributes.targetPos.array;
-
-    for(let i=0;i<p.length;i++) p[i]=t[i];
-    state.morph = 0;
-
-    for(let i=0;i<PARTICLE_COUNT;i++){
-        const i3=i*3;
-        let x=0,y=0,z=0;
-        const r=Math.random();
-
-        if(type==='SPHERE'){
-            const u=i/PARTICLE_COUNT;
-            const v=Math.acos(2*u-1);
-            const a=Math.sqrt(PARTICLE_COUNT*Math.PI)*v;
-            x=2*Math.cos(a)*Math.sin(v);
-            y=2*Math.sin(a)*Math.sin(v);
-            z=2*Math.cos(v);
-        }
-        else if(type==='HEART'){
-            const t0=i/PARTICLE_COUNT*Math.PI*2;
-            x=0.15*(16*Math.sin(t0)**3);
-            y=0.15*(13*Math.cos(t0)-5*Math.cos(2*t0)-2*Math.cos(3*t0)-Math.cos(4*t0));
-            z=(r-0.5)*0.5;
-        }
-        else if(type==='SATURN'){
-            if(i<PARTICLE_COUNT*0.6){
-                const a=Math.random()*Math.PI*2;
-                const b=Math.random()*Math.PI;
-                x=Math.cos(a)*Math.sin(b)*1.5;
-                y=Math.sin(a)*Math.sin(b)*1.5;
-                z=Math.cos(b)*1.5;
-            }else{
-                const a=Math.random()*Math.PI*2;
-                const rr=2+Math.random();
-                x=Math.cos(a)*rr;
-                y=Math.sin(a)*rr;
-                z=(r-0.5)*0.1;
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
             }
         }
-        else if(type==='FLOWER'){
-            const t0=i/PARTICLE_COUNT*Math.PI*20;
-            const rr=2*Math.cos(4*t0);
-            x=rr*Math.cos(t0);
-            y=rr*Math.sin(t0);
-            z=(r-0.5)*0.5;
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Configuration ---
+        const PARTICLE_COUNT = 15000;
+        const SHAPES = ['SPHERE', 'HEART', 'SATURN', 'FLOWER', 'EXPLOSION'];
+        let currentShapeIndex = 0;
+        let currentMode = 'PARTICLES'; // 'PARTICLES' or 'SHAPES'
+
+        // --- State Management ---
+        const state = {
+            targetPositions: new Float32Array(PARTICLE_COUNT * 3),
+            handPresent: false,
+            handX: 0, handY: 0, handZ: 0,
+            handRotX: 0, handRotY: 0,
+            pinchIntensity: 0,
+            expansion: 1.0,
+            morphProgress: 1.0,
+            objectScale: 1.0,
+            objectRotX: 0,
+            objectRotY: 0,
+            objectPosX: 0,
+            objectPosY: 0
+        };
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 5;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // --- Custom Shader Material (Particles) ---
+        const vertexShader = `
+            uniform float uTime;
+            uniform float uMorph;
+            uniform float uExpansion;
+            uniform vec3 uHandPos;
+            attribute vec3 targetPos;
+            attribute vec3 color;
+            varying vec3 vColor;
+
+            void main() {
+                vColor = color;
+                
+                vec3 pos = mix(position, targetPos, uMorph);
+                
+                float dist = distance(pos, uHandPos);
+                float influence = smoothstep(2.0, 0.0, dist);
+                pos += normalize(pos - uHandPos) * influence * uExpansion;
+
+                vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                gl_PointSize = (20.0 / -mvPosition.z) * (1.0 + influence);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `;
+
+        const fragmentShader = `
+            varying vec3 vColor;
+            void main() {
+                float dist = distance(gl_PointCoord, vec2(0.5));
+                if (dist > 0.5) discard;
+                float alpha = 1.0 - smoothstep(0.4, 0.5, dist);
+                gl_FragColor = vec4(vColor, alpha);
+            }
+        `;
+
+        // --- Particle System ---
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            positions[i * 3] = (Math.random() - 0.5) * 10;
+            positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
+            
+            colors[i * 3] = Math.random();
+            colors[i * 3 + 1] = Math.random();
+            colors[i * 3 + 2] = 0.8 + Math.random() * 0.2;
         }
-        else{
-            x=(r-0.5)*10;
-            y=(Math.random()-0.5)*10;
-            z=(Math.random()-0.5)*10;
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('targetPos', new THREE.BufferAttribute(targetPositions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms: {
+                uTime: { value: 0 },
+                uMorph: { value: 0 },
+                uExpansion: { value: 0 },
+                uHandPos: { value: new THREE.Vector3() }
+            },
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+
+        const particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
+
+        // --- Solid Mesh System ---
+        let currentMesh = null;
+        const meshMaterial = new THREE.MeshPhongMaterial({ 
+            color: 0x00ffcc, 
+            emissive: 0x0044aa,
+            shininess: 100,
+            transparent: true,
+            opacity: 0.9
+        });
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const pointLight = new THREE.PointLight(0xffffff, 1);
+        pointLight.position.set(5, 5, 5);
+        scene.add(pointLight);
+
+        function createMesh(shapeType) {
+            if (currentMesh) {
+                scene.remove(currentMesh);
+            }
+
+            let geometry;
+            
+            if (shapeType === 'SPHERE') {
+                geometry = new THREE.SphereGeometry(2, 32, 32);
+            } 
+            else if (shapeType === 'HEART') {
+                const shape = new THREE.Shape();
+                const x = 0, y = 0;
+                shape.moveTo(x + 0, y + 0);
+                shape.bezierCurveTo(x + 0, y - 0.3, x - 0.6, y - 0.3, x - 0.6, y + 0);
+                shape.bezierCurveTo(x - 0.6, y + 0.3, x - 0.3, y + 0.6, x + 0, y + 1);
+                shape.bezierCurveTo(x + 0.3, y + 0.6, x + 0.6, y + 0.3, x + 0.6, y + 0);
+                shape.bezierCurveTo(x + 0.6, y - 0.3, x + 0, y - 0.3, x + 0, y + 0);
+                
+                const extrudeSettings = { depth: 0.4, bevelEnabled: true, bevelThickness: 0.1, bevelSize: 0.1 };
+                geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+                geometry.scale(3, 3, 3);
+            }
+            else if (shapeType === 'SATURN') {
+                const group = new THREE.Group();
+                const sphere = new THREE.Mesh(
+                    new THREE.SphereGeometry(1.5, 32, 32),
+                    meshMaterial
+                );
+                const ring = new THREE.Mesh(
+                    new THREE.TorusGeometry(2.5, 0.15, 16, 100),
+                    meshMaterial
+                );
+                ring.rotation.x = Math.PI / 2.3;
+                group.add(sphere);
+                group.add(ring);
+                currentMesh = group;
+                scene.add(currentMesh);
+                return;
+            }
+            else if (shapeType === 'FLOWER') {
+                const group = new THREE.Group();
+                for (let i = 0; i < 8; i++) {
+                    const petal = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.5, 16, 16),
+                        meshMaterial
+                    );
+                    const angle = (i / 8) * Math.PI * 2;
+                    petal.position.x = Math.cos(angle) * 1.5;
+                    petal.position.y = Math.sin(angle) * 1.5;
+                    petal.scale.set(1, 2, 0.5);
+                    group.add(petal);
+                }
+                const center = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.7, 16, 16),
+                    new THREE.MeshPhongMaterial({ color: 0xffff00, emissive: 0xaa8800 })
+                );
+                group.add(center);
+                currentMesh = group;
+                scene.add(currentMesh);
+                return;
+            }
+            else { // EXPLOSION (Spiky ball)
+                geometry = new THREE.IcosahedronGeometry(2, 1);
+                const posAttr = geometry.attributes.position;
+                for (let i = 0; i < posAttr.count; i++) {
+                    const x = posAttr.getX(i);
+                    const y = posAttr.getY(i);
+                    const z = posAttr.getZ(i);
+                    const length = Math.sqrt(x*x + y*y + z*z);
+                    const scale = 1 + Math.random() * 0.5;
+                    posAttr.setXYZ(i, x/length * scale * 2, y/length * scale * 2, z/length * scale * 2);
+                }
+            }
+
+            currentMesh = new THREE.Mesh(geometry, meshMaterial);
+            scene.add(currentMesh);
         }
 
-        t[i3]=x; t[i3+1]=y; t[i3+2]=z;
-    }
+        // --- Shape Math (Particles) ---
+        function setParticleShape(shapeType) {
+            const posAttr = geometry.attributes.position;
+            const tarAttr = geometry.attributes.targetPos;
+            
+            for(let i=0; i<PARTICLE_COUNT*3; i++) {
+                posAttr.array[i] = tarAttr.array[i];
+            }
+            posAttr.needsUpdate = true;
+            state.morphProgress = 0;
 
-    geometry.attributes.targetPos.needsUpdate = true;
-    document.getElementById('shape-display').innerText = type;
-}
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                let x, y, z;
 
-setShape(SHAPES[0]);
+                if (shapeType === 'SPHERE') {
+                    const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+                    const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+                    x = 2 * Math.cos(theta) * Math.sin(phi);
+                    y = 2 * Math.sin(theta) * Math.sin(phi);
+                    z = 2 * Math.cos(phi);
+                } 
+                else if (shapeType === 'HEART') {
+                    const t = (i / PARTICLE_COUNT) * Math.PI * 2;
+                    x = 0.15 * (16 * Math.pow(Math.sin(t), 3));
+                    y = 0.15 * (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+                    z = (Math.random() - 0.5) * 0.5;
+                } 
+                else if (shapeType === 'SATURN') {
+                    if (i < PARTICLE_COUNT * 0.6) {
+                        const phi = Math.random() * Math.PI * 2;
+                        const theta = Math.random() * Math.PI;
+                        x = Math.cos(phi) * Math.sin(theta) * 1.5;
+                        y = Math.sin(phi) * Math.sin(theta) * 1.5;
+                        z = Math.cos(theta) * 1.5;
+                    } else {
+                        const r = 2.0 + Math.random() * 0.8;
+                        const angle = Math.random() * Math.PI * 2;
+                        x = Math.cos(angle) * r;
+                        y = Math.sin(angle) * r;
+                        z = (Math.random() - 0.5) * 0.1;
+                    }
+                }
+                else if (shapeType === 'FLOWER') {
+                    const t = (i / PARTICLE_COUNT) * Math.PI * 20;
+                    const r = 2 * Math.cos(4 * t);
+                    x = r * Math.cos(t);
+                    y = r * Math.sin(t);
+                    z = (Math.random() - 0.5) * 0.5;
+                }
+                else { // Explosion
+                    x = (Math.random() - 0.5) * 10;
+                    y = (Math.random() - 0.5) * 10;
+                    z = (Math.random() - 0.5) * 10;
+                }
 
-// ---------- HAND TRACKING ----------
-let handLandmarker;
-async function initHands(){
-    const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
-    );
-    handLandmarker = await HandLandmarker.createFromOptions(vision,{
-        baseOptions:{ modelAssetPath:
-        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"},
-        runningMode:"VIDEO",
-        numHands:1
-    });
-
-    const video=document.getElementById("webcam");
-    video.srcObject=await navigator.mediaDevices.getUserMedia({video:true});
-    video.onloadeddata=()=>predict(video);
-}
-
-let lastPinch=false;
-function predict(video){
-    const res=handLandmarker.detectForVideo(video,performance.now());
-    if(res.landmarks?.length){
-        const h=res.landmarks[0];
-        state.hand.set((h[9].x-0.5)*-10,(h[9].y-0.5)*-10,0);
-        const pinch=Math.hypot(h[4].x-h[8].x,h[4].y-h[8].y)<0.05;
-        if(pinch&&!lastPinch){
-            currentShapeIndex=(currentShapeIndex+1)%SHAPES.length;
-            setShape(SHAPES[currentShapeIndex]);
+                tarAttr.array[i3] = x;
+                tarAttr.array[i3 + 1] = y;
+                tarAttr.array[i3 + 2] = z;
+            }
+            tarAttr.needsUpdate = true;
         }
-        lastPinch=pinch;
-        state.expansion=Math.hypot(h[4].x-h[20].x,h[4].y-h[20].y)*5;
-        state.handPresent=true;
-    }else{
-        state.handPresent=false;
-    }
-    requestAnimationFrame(()=>predict(video));
-}
 
-// ---------- LOOP ----------
-function animate(t){
-    requestAnimationFrame(animate);
-    renderer.setClearColor(0x000000,0.08);
-    renderer.clearDepth();
+        function setShape(shapeType) {
+            if (currentMode === 'PARTICLES') {
+                setParticleShape(shapeType);
+            } else {
+                createMesh(shapeType);
+            }
+            document.getElementById('shape-display').innerText = shapeType;
+        }
 
-    material.uniforms.uTime.value=t*0.001;
-    material.uniforms.uMorph.value=Math.min(state.morph+=0.02,1);
+        function switchMode() {
+            currentMode = currentMode === 'PARTICLES' ? 'SHAPES' : 'PARTICLES';
+            const modeDisplay = document.getElementById('mode-display');
+            
+            if (currentMode === 'PARTICLES') {
+                modeDisplay.innerText = 'PARTICLES MODE';
+                modeDisplay.className = 'mode-indicator mode-particles';
+                particleSystem.visible = true;
+                if (currentMesh) currentMesh.visible = false;
+            } else {
+                modeDisplay.innerText = 'SHAPES MODE';
+                modeDisplay.className = 'mode-indicator mode-shapes';
+                particleSystem.visible = false;
+                createMesh(SHAPES[currentShapeIndex]);
+                if (currentMesh) currentMesh.visible = true;
+            }
+        }
 
-    if(state.handPresent){
-        material.uniforms.uHand.value.lerp(state.hand,0.1);
-        material.uniforms.uExpansion.value=THREE.MathUtils.lerp(
-            material.uniforms.uExpansion.value,state.expansion,0.1);
-    }else material.uniforms.uExpansion.value*=0.95;
+        // Initialize
+        setShape(SHAPES[0]);
 
-    const b=SHAPE_BEHAVIOR[SHAPES[currentShapeIndex]];
-    material.uniforms.uNoiseStrength.value=b.noise;
-    points.rotation.y+=b.rotation;
+        // --- MediaPipe Hand Tracking ---
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
 
-    renderer.render(scene,camera);
-}
+        let handLandmarker;
+        async function initHandTracking() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm");
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task` },
+                runningMode: "VIDEO",
+                numHands: 1
+            });
+            startCamera();
+        }
 
-addEventListener('resize',()=>{
-    camera.aspect=innerWidth/innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth,innerHeight);
-});
+        async function startCamera() {
+            const video = document.getElementById('webcam');
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            video.addEventListener('loadeddata', predictWebcam);
+        }
 
-initHands();
-animate();
-</script>
+        let lastPinch = false;
+        let lastPeace = false;
+        
+        function detectPeaceSign(hand) {
+            // Index and middle finger extended, others closed
+            const indexTip = hand[8].y;
+            const indexBase = hand[5].y;
+            const middleTip = hand[12].y;
+            const middleBase = hand[9].y;
+            const ringTip = hand[16].y;
+            const ringBase = hand[13].y;
+            const pinkyTip = hand[20].y;
+            const pinkyBase = hand[17].y;
+            
+            const indexExtended = indexTip < indexBase - 0.05;
+            const middleExtended = middleTip < middleBase - 0.05;
+            const ringClosed = ringTip > ringBase - 0.03;
+            const pinkyClosed = pinkyTip > pinkyBase - 0.03;
+            
+            return indexExtended && middleExtended && ringClosed && pinkyClosed;
+        }
+
+        async function predictWebcam() {
+            const video = document.getElementById('webcam');
+            let results = handLandmarker.detectForVideo(video, performance.now());
+
+            if (results.landmarks && results.landmarks.length > 0) {
+                const hand = results.landmarks[0];
+                
+                // Map hand coordinates
+                state.handX = (hand[9].x - 0.5) * -10; 
+                state.handY = (hand[9].y - 0.5) * -10;
+                state.handZ = (hand[9].z) * 10;
+
+                // Calculate hand rotation based on wrist to middle finger
+                const dx = hand[9].x - hand[0].x;
+                const dy = hand[9].y - hand[0].y;
+                state.handRotY = Math.atan2(dx, dy);
+                state.handRotX = (hand[9].z - hand[0].z) * 5;
+
+                // Peace sign detection (mode switch)
+                const isPeace = detectPeaceSign(hand);
+                if (isPeace && !lastPeace) {
+                    switchMode();
+                }
+                lastPeace = isPeace;
+
+                // Pinch Detection (shape change)
+                const dist = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+                const isPinching = dist < 0.05;
+
+                if (isPinching && !lastPinch) {
+                    currentShapeIndex = (currentShapeIndex + 1) % SHAPES.length;
+                    setShape(SHAPES[currentShapeIndex]);
+                }
+                lastPinch = isPinching;
+
+                // Expansion/Scale (hand spread)
+                const spread = Math.hypot(hand[4].x - hand[20].x, hand[4].y - hand[20].y);
+                state.expansion = spread * 5;
+                state.objectScale = Math.max(0.3, spread * 3);
+
+                // Position
+                state.objectPosX = state.handX;
+                state.objectPosY = state.handY;
+
+                // Rotation
+                state.objectRotX = state.handRotX;
+                state.objectRotY = state.handRotY;
+
+                state.handPresent = true;
+            } else {
+                state.handPresent = false;
+            }
+
+            requestAnimationFrame(predictWebcam);
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            material.uniforms.uTime.value = performance.now() * 0.001;
+            
+            if (currentMode === 'PARTICLES') {
+                if (state.morphProgress < 1.0) {
+                    state.morphProgress += 0.02;
+                    material.uniforms.uMorph.value = state.morphProgress;
+                }
+
+                if (state.handPresent) {
+                    material.uniforms.uHandPos.value.lerp(new THREE.Vector3(state.handX, state.handY, 0), 0.1);
+                    material.uniforms.uExpansion.value = THREE.MathUtils.lerp(material.uniforms.uExpansion.value, state.expansion, 0.1);
+                } else {
+                    material.uniforms.uExpansion.value *= 0.95;
+                }
+
+                particleSystem.rotation.y += 0.002;
+                particleSystem.rotation.x += 0.001;
+            } 
+            else if (currentMode === 'SHAPES' && currentMesh) {
+                if (state.handPresent) {
+                    // Smooth position tracking
+                    currentMesh.position.x = THREE.MathUtils.lerp(currentMesh.position.x, state.objectPosX * 0.5, 0.1);
+                    currentMesh.position.y = THREE.MathUtils.lerp(currentMesh.position.y, state.objectPosY * 0.5, 0.1);
+                    
+                    // Smooth rotation based on hand tilt
+                    currentMesh.rotation.y = THREE.MathUtils.lerp(currentMesh.rotation.y, state.objectRotY, 0.1);
+                    currentMesh.rotation.x = THREE.MathUtils.lerp(currentMesh.rotation.x, state.objectRotX, 0.1);
+                    
+                    // Smooth scale
+                    const targetScale = state.objectScale;
+                    currentMesh.scale.setScalar(THREE.MathUtils.lerp(currentMesh.scale.x, targetScale, 0.1));
+                } else {
+                    // Idle rotation when no hand
+                    currentMesh.rotation.y += 0.005;
+                    currentMesh.rotation.x += 0.003;
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        initHandTracking();
+        animate();
+    </script>
 </body>
 </html>
