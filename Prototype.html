@@ -6,13 +6,29 @@
     <title>Hand Gesture Particle & Shape Morph</title>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
-        #video-container { position: absolute; bottom: 10px; left: 10px; width: 260px; height: 220px; border: 2px solid white; transform: scaleX(-1); border-radius: 8px; overflow: hidden; }
+        #video-container { 
+            position: absolute; 
+            bottom: 10px; 
+            left: 10px; 
+            width: 260px; 
+            height: 220px; 
+            border: 2px solid white; 
+            transform: scaleX(-1); 
+            border-radius: 8px; 
+            overflow: hidden;
+            cursor: move;
+            user-select: none;
+            transition: border-color 0.2s;
+        }
+        #video-container:hover { border-color: #00ffcc; }
+        #video-container.dragging { border-color: #ff00ff; cursor: grabbing; }
         #ui { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; text-shadow: 2px 2px 4px rgba(0,0,0,0.5); }
         .label { font-size: 12px; opacity: 0.7; }
         .gesture-name { font-size: 24px; font-weight: bold; color: #00ffcc; }
         .mode-indicator { font-size: 18px; font-weight: bold; color: #ff00ff; margin-top: 10px; }
         .mode-particles { color: #00ffcc; }
         .mode-shapes { color: #ff6b6b; }
+        .debug { font-size: 11px; opacity: 0.5; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -32,6 +48,7 @@
             <strong>Move Hand:</strong> Translate<br>
             <strong>Tilt Hand:</strong> Rotate (Shapes Mode)
         </div>
+        <div id="debug-info" class="debug"></div>
     </div>
     <div id="video-container">
         <video id="webcam" autoplay playsinline></video>
@@ -365,6 +382,27 @@
         let lastPinch = false;
         let lastPeace = false;
         
+        // Gesture stabilization buffers
+        const gestureBuffer = {
+            pinch: [],
+            peace: [],
+            bufferSize: 5,
+            threshold: 0.6 // 60% of frames must detect gesture
+        };
+
+        function addToBuffer(buffer, value) {
+            buffer.push(value);
+            if (buffer.length > gestureBuffer.bufferSize) {
+                buffer.shift();
+            }
+        }
+
+        function isGestureStable(buffer) {
+            if (buffer.length < gestureBuffer.bufferSize) return false;
+            const trueCount = buffer.filter(v => v).length;
+            return (trueCount / buffer.length) >= gestureBuffer.threshold;
+        }
+        
         function detectPeaceSign(hand) {
             // Index and middle finger extended, others closed
             const indexTip = hand[8].y;
@@ -375,13 +413,50 @@
             const ringBase = hand[13].y;
             const pinkyTip = hand[20].y;
             const pinkyBase = hand[17].y;
+            const thumbTip = hand[4].y;
+            const thumbBase = hand[2].y;
             
-            const indexExtended = indexTip < indexBase - 0.05;
+            // Check if index and middle are extended (tips below base in y)
+            const indexExtended = indexTip < indexBase - 0.08;
+            const middleExtended = middleTip < middleBase - 0.08;
+            
+            // Check if ring and pinky are NOT extended (more strict)
+            const ringClosed = ringTip > ringBase - 0.02;
+            const pinkyClosed = pinkyTip > pinkyBase - 0.02;
+            
+            // Thumb should be somewhat closed
+            const thumbNotExtended = thumbTip > thumbBase - 0.05;
+            
+            // Also check finger separation (peace fingers should be apart)
+            const fingerSeparation = Math.abs(hand[8].x - hand[12].x);
+            const separated = fingerSeparation > 0.03;
+            
+            return indexExtended && middleExtended && ringClosed && pinkyClosed && thumbNotExtended && separated;
+        }
+
+        function detectPinch(hand) {
+            // Distance between thumb tip and index tip
+            const thumbTip = hand[4];
+            const indexTip = hand[8];
+            const dist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y, thumbTip.z - indexTip.z);
+            
+            // Also check if other fingers are extended (open palm = not pinching)
+            const middleTip = hand[12].y;
+            const middleBase = hand[9].y;
             const middleExtended = middleTip < middleBase - 0.05;
-            const ringClosed = ringTip > ringBase - 0.03;
-            const pinkyClosed = pinkyTip > pinkyBase - 0.03;
             
-            return indexExtended && middleExtended && ringClosed && pinkyClosed;
+            // Pinch should be close AND middle finger shouldn't be fully extended
+            return dist < 0.06 && !middleExtended;
+        }
+
+        function getHandSpread(hand) {
+            // More robust spread calculation using multiple finger pairs
+            const thumbPinky = Math.hypot(hand[4].x - hand[20].x, hand[4].y - hand[20].y);
+            const thumbIndex = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+            const indexPinky = Math.hypot(hand[8].x - hand[20].x, hand[8].y - hand[20].y);
+            
+            // Average of multiple measurements for stability
+            return (thumbPinky + thumbIndex * 0.7 + indexPinky * 0.5) / 2.2;
         }
 
         async function predictWebcam() {
@@ -402,25 +477,36 @@
                 state.handRotY = Math.atan2(dx, dy);
                 state.handRotX = (hand[9].z - hand[0].z) * 5;
 
-                // Peace sign detection (mode switch)
-                const isPeace = detectPeaceSign(hand);
-                if (isPeace && !lastPeace) {
+                // Detect gestures with buffering for stability
+                const peaceDetected = detectPeaceSign(hand);
+                const pinchDetected = detectPinch(hand);
+                
+                addToBuffer(gestureBuffer.peace, peaceDetected);
+                addToBuffer(gestureBuffer.pinch, pinchDetected);
+                
+                const isPeaceStable = isGestureStable(gestureBuffer.peace);
+                const isPinchStable = isGestureStable(gestureBuffer.pinch);
+
+                // Debug info
+                document.getElementById('debug-info').innerHTML = 
+                    `Peace: ${peaceDetected ? '✓' : '✗'} (${isPeaceStable ? 'STABLE' : 'unstable'})<br>` +
+                    `Pinch: ${pinchDetected ? '✓' : '✗'} (${isPinchStable ? 'STABLE' : 'unstable'})`;
+
+                // Peace sign detection (mode switch) - only trigger on stable gesture
+                if (isPeaceStable && !lastPeace) {
                     switchMode();
                 }
-                lastPeace = isPeace;
+                lastPeace = isPeaceStable;
 
-                // Pinch Detection (shape change)
-                const dist = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
-                const isPinching = dist < 0.05;
-
-                if (isPinching && !lastPinch) {
+                // Pinch Detection (shape change) - only trigger on stable gesture
+                if (isPinchStable && !lastPinch) {
                     currentShapeIndex = (currentShapeIndex + 1) % SHAPES.length;
                     setShape(SHAPES[currentShapeIndex]);
                 }
-                lastPinch = isPinching;
+                lastPinch = isPinchStable;
 
-                // Expansion/Scale (hand spread)
-                const spread = Math.hypot(hand[4].x - hand[20].x, hand[4].y - hand[20].y);
+                // Expansion/Scale (hand spread) - using improved calculation
+                const spread = getHandSpread(hand);
                 state.expansion = spread * 5;
                 state.objectScale = Math.max(0.3, spread * 3);
 
@@ -435,6 +521,9 @@
                 state.handPresent = true;
             } else {
                 state.handPresent = false;
+                // Clear buffers when hand is not detected
+                gestureBuffer.pinch = [];
+                gestureBuffer.peace = [];
             }
 
             requestAnimationFrame(predictWebcam);
@@ -489,6 +578,73 @@
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- Draggable Video Container ---
+        const videoContainer = document.getElementById('video-container');
+        let isDragging = false;
+        let dragOffset = { x: 0, y: 0 };
+
+        videoContainer.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            videoContainer.classList.add('dragging');
+            dragOffset.x = e.clientX - videoContainer.offsetLeft;
+            dragOffset.y = e.clientY - videoContainer.offsetTop;
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            
+            let newX = e.clientX - dragOffset.x;
+            let newY = e.clientY - dragOffset.y;
+            
+            // Keep within viewport bounds
+            newX = Math.max(0, Math.min(newX, window.innerWidth - videoContainer.offsetWidth));
+            newY = Math.max(0, Math.min(newY, window.innerHeight - videoContainer.offsetHeight));
+            
+            videoContainer.style.left = newX + 'px';
+            videoContainer.style.top = newY + 'px';
+            videoContainer.style.bottom = 'auto';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                videoContainer.classList.remove('dragging');
+            }
+        });
+
+        // Touch support for mobile
+        videoContainer.addEventListener('touchstart', (e) => {
+            isDragging = true;
+            videoContainer.classList.add('dragging');
+            const touch = e.touches[0];
+            dragOffset.x = touch.clientX - videoContainer.offsetLeft;
+            dragOffset.y = touch.clientY - videoContainer.offsetTop;
+            e.preventDefault();
+        });
+
+        document.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            
+            const touch = e.touches[0];
+            let newX = touch.clientX - dragOffset.x;
+            let newY = touch.clientY - dragOffset.y;
+            
+            newX = Math.max(0, Math.min(newX, window.innerWidth - videoContainer.offsetWidth));
+            newY = Math.max(0, Math.min(newY, window.innerHeight - videoContainer.offsetHeight));
+            
+            videoContainer.style.left = newX + 'px';
+            videoContainer.style.top = newY + 'px';
+            videoContainer.style.bottom = 'auto';
+        });
+
+        document.addEventListener('touchend', () => {
+            if (isDragging) {
+                isDragging = false;
+                videoContainer.classList.remove('dragging');
+            }
         });
 
         initHandTracking();
