@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Enhanced Hand Particle Morph</title>
+<style>
+    body { margin: 0; overflow: hidden; background: black; font-family: sans-serif; }
+    #video-container {
+        position: absolute;
+        bottom: 10px;
+        left: 10px;
+        width: 260px;
+        height: 220px;
+        border: 2px solid white;
+        transform: scaleX(-1);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    #ui {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: white;
+        pointer-events: none;
+    }
+    .label { font-size: 12px; opacity: 0.7; }
+    .gesture-name { font-size: 24px; font-weight: bold; color: #00ffcc; }
+</style>
+</head>
+
+<body>
+<div id="ui">
+    <div class="label">CURRENT SHAPE</div>
+    <div id="shape-display" class="gesture-name">Initializing…</div>
+</div>
+
+<div id="video-container">
+    <video id="webcam" autoplay playsinline></video>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { HandLandmarker, FilesetResolver } from
+"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+const PARTICLE_COUNT = 15000;
+const SHAPES = ['SPHERE','HEART','SATURN','FLOWER','EXPLOSION'];
+
+const SHAPE_BEHAVIOR = {
+    SPHERE:   { rotation: 0.002, noise: 0.10 },
+    HEART:    { rotation: 0.001, noise: 0.20 },
+    SATURN:   { rotation: 0.004, noise: 0.05 },
+    FLOWER:   { rotation: 0.003, noise: 0.15 },
+    EXPLOSION:{ rotation: 0.000, noise: 0.40 }
+};
+
+let currentShapeIndex = 0;
+
+const state = {
+    morph: 1,
+    expansion: 0,
+    hand: new THREE.Vector3(),
+    handPresent: false
+};
+
+// ---------- THREE SETUP ----------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+camera.position.z = 6;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+// ---------- GEOMETRY ----------
+const geometry = new THREE.BufferGeometry();
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const targets   = new Float32Array(PARTICLE_COUNT * 3);
+const velocities= new Float32Array(PARTICLE_COUNT * 3);
+const colors    = new Float32Array(PARTICLE_COUNT * 3);
+
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+    positions[i*3+0] = (Math.random()-0.5)*10;
+    positions[i*3+1] = (Math.random()-0.5)*10;
+    positions[i*3+2] = (Math.random()-0.5)*10;
+
+    colors[i*3+0] = 0.4 + Math.random()*0.6;
+    colors[i*3+1] = 0.8;
+    colors[i*3+2] = 1.0;
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(positions,3));
+geometry.setAttribute('targetPos', new THREE.BufferAttribute(targets,3));
+geometry.setAttribute('velocity', new THREE.BufferAttribute(velocities,3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors,3));
+
+// ---------- SHADERS ----------
+const material = new THREE.ShaderMaterial({
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    uniforms: {
+        uTime: { value: 0 },
+        uMorph: { value: 0 },
+        uHand: { value: new THREE.Vector3() },
+        uExpansion: { value: 0 },
+        uNoiseStrength: { value: 0.15 }
+    },
+    vertexShader: `
+        uniform float uTime, uMorph, uExpansion, uNoiseStrength;
+        uniform vec3 uHand;
+        attribute vec3 targetPos, velocity, color;
+        varying vec3 vColor;
+        varying float vDepth;
+
+        float hash(float n){ return fract(sin(n)*43758.5453); }
+        float noise(vec3 x){
+            vec3 p=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+            float n=p.x+p.y*57.0+p.z*113.0;
+            return mix(
+                mix(mix(hash(n),hash(n+1.),f.x),
+                    mix(hash(n+57.),hash(n+58.),f.x),f.y),
+                mix(mix(hash(n+113.),hash(n+114.),f.x),
+                    mix(hash(n+170.),hash(n+171.),f.x),f.y),f.z);
+        }
+
+        void main(){
+            vColor = color;
+            vec3 pos = mix(position, targetPos, uMorph);
+
+            float n = noise(pos*0.8 + uTime*0.3);
+            pos += normalize(pos+0.0001) * n * uNoiseStrength;
+
+            float d = distance(pos, uHand);
+            float influence = smoothstep(3.0, 0.0, d);
+
+            vec3 dir = pos - uHand;
+            pos += normalize(dir) * influence * uExpansion;
+            pos.xz += vec2(-dir.z, dir.x) * influence * 0.8;
+
+            vec4 mv = modelViewMatrix * vec4(pos,1.0);
+            vDepth = -mv.z;
+            gl_PointSize = (18.0 / -mv.z) * (1.0 + influence);
+            gl_Position = projectionMatrix * mv;
+        }
+    `,
+    fragmentShader: `
+        varying vec3 vColor;
+        varying float vDepth;
+        void main(){
+            float d = distance(gl_PointCoord, vec2(0.5));
+            if(d > 0.5) discard;
+            float a = 1.0 - smoothstep(0.35,0.5,d);
+            vec3 depthColor = mix(vColor, vec3(0.1,0.8,1.0), vDepth*0.02);
+            gl_FragColor = vec4(depthColor, a);
+        }
+    `
+});
+
+const points = new THREE.Points(geometry, material);
+scene.add(points);
+
+// ---------- SHAPES ----------
+function setShape(type){
+    const p = geometry.attributes.position.array;
+    const t = geometry.attributes.targetPos.array;
+
+    for(let i=0;i<p.length;i++) p[i]=t[i];
+    state.morph = 0;
+
+    for(let i=0;i<PARTICLE_COUNT;i++){
+        const i3=i*3;
+        let x=0,y=0,z=0;
+        const r=Math.random();
+
+        if(type==='SPHERE'){
+            const u=i/PARTICLE_COUNT;
+            const v=Math.acos(2*u-1);
+            const a=Math.sqrt(PARTICLE_COUNT*Math.PI)*v;
+            x=2*Math.cos(a)*Math.sin(v);
+            y=2*Math.sin(a)*Math.sin(v);
+            z=2*Math.cos(v);
+        }
+        else if(type==='HEART'){
+            const t0=i/PARTICLE_COUNT*Math.PI*2;
+            x=0.15*(16*Math.sin(t0)**3);
+            y=0.15*(13*Math.cos(t0)-5*Math.cos(2*t0)-2*Math.cos(3*t0)-Math.cos(4*t0));
+            z=(r-0.5)*0.5;
+        }
+        else if(type==='SATURN'){
+            if(i<PARTICLE_COUNT*0.6){
+                const a=Math.random()*Math.PI*2;
+                const b=Math.random()*Math.PI;
+                x=Math.cos(a)*Math.sin(b)*1.5;
+                y=Math.sin(a)*Math.sin(b)*1.5;
+                z=Math.cos(b)*1.5;
+            }else{
+                const a=Math.random()*Math.PI*2;
+                const rr=2+Math.random();
+                x=Math.cos(a)*rr;
+                y=Math.sin(a)*rr;
+                z=(r-0.5)*0.1;
+            }
+        }
+        else if(type==='FLOWER'){
+            const t0=i/PARTICLE_COUNT*Math.PI*20;
+            const rr=2*Math.cos(4*t0);
+            x=rr*Math.cos(t0);
+            y=rr*Math.sin(t0);
+            z=(r-0.5)*0.5;
+        }
+        else{
+            x=(r-0.5)*10;
+            y=(Math.random()-0.5)*10;
+            z=(Math.random()-0.5)*10;
+        }
+
+        t[i3]=x; t[i3+1]=y; t[i3+2]=z;
+    }
+
+    geometry.attributes.targetPos.needsUpdate = true;
+    document.getElementById('shape-display').innerText = type;
+}
+
+setShape(SHAPES[0]);
+
+// ---------- HAND TRACKING ----------
+let handLandmarker;
+async function initHands(){
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+    );
+    handLandmarker = await HandLandmarker.createFromOptions(vision,{
+        baseOptions:{ modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"},
+        runningMode:"VIDEO",
+        numHands:1
+    });
+
+    const video=document.getElementById("webcam");
+    video.srcObject=await navigator.mediaDevices.getUserMedia({video:true});
+    video.onloadeddata=()=>predict(video);
+}
+
+let lastPinch=false;
+function predict(video){
+    const res=handLandmarker.detectForVideo(video,performance.now());
+    if(res.landmarks?.length){
+        const h=res.landmarks[0];
+        state.hand.set((h[9].x-0.5)*-10,(h[9].y-0.5)*-10,0);
+        const pinch=Math.hypot(h[4].x-h[8].x,h[4].y-h[8].y)<0.05;
+        if(pinch&&!lastPinch){
+            currentShapeIndex=(currentShapeIndex+1)%SHAPES.length;
+            setShape(SHAPES[currentShapeIndex]);
+        }
+        lastPinch=pinch;
+        state.expansion=Math.hypot(h[4].x-h[20].x,h[4].y-h[20].y)*5;
+        state.handPresent=true;
+    }else{
+        state.handPresent=false;
+    }
+    requestAnimationFrame(()=>predict(video));
+}
+
+// ---------- LOOP ----------
+function animate(t){
+    requestAnimationFrame(animate);
+    renderer.setClearColor(0x000000,0.08);
+    renderer.clearDepth();
+
+    material.uniforms.uTime.value=t*0.001;
+    material.uniforms.uMorph.value=Math.min(state.morph+=0.02,1);
+
+    if(state.handPresent){
+        material.uniforms.uHand.value.lerp(state.hand,0.1);
+        material.uniforms.uExpansion.value=THREE.MathUtils.lerp(
+            material.uniforms.uExpansion.value,state.expansion,0.1);
+    }else material.uniforms.uExpansion.value*=0.95;
+
+    const b=SHAPE_BEHAVIOR[SHAPES[currentShapeIndex]];
+    material.uniforms.uNoiseStrength.value=b.noise;
+    points.rotation.y+=b.rotation;
+
+    renderer.render(scene,camera);
+}
+
+addEventListener('resize',()=>{
+    camera.aspect=innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth,innerHeight);
+});
+
+initHands();
+animate();
+</script>
+</body>
+</html>
